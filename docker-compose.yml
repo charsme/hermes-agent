@@ -1,30 +1,31 @@
 #
-# docker-compose.yml for Hermes Agent
+# docker-compose.yml for Hermes Agent — Charis deployment
+#
+# Local-deployment patch. NOT for upstream. Snapshotted to
+# /data/stacks/hermes/home/ops/patches/0002-docker-compose-deployment.patch
+# for rebase recovery. Reapply via git apply after upstream pulls.
 #
 # Usage:
+#   cd /data/stacks/hermes/hermes-agent
 #   HERMES_UID=$(id -u) HERMES_GID=$(id -g) docker compose up -d
 #
-# Set HERMES_UID / HERMES_GID to the host user that owns ~/.hermes so
-# files created inside the container stay readable/writable on the host.
-# The s6-overlay stage2 hook remaps the internal `hermes` user to these
-# values via usermod/groupmod; each supervised service then drops to that
-# user via `s6-setuidgid`.
+# Diverges from upstream:
+#   - network_mode: host → networks: [inside-net]  (joins host service mesh
+#     where lumina-litellm, memory-mcp, memory-gateway, nano-webhook live)
+#   - bind mounts split: HERMES_HOME on /data/stacks/hermes/data;
+#     logs on /data/logs/hermes (mount-over for rotation independence);
+#     agent-work on /data/stacks/hermes/agent-work (separate volume scope)
+#   - mem_limit / cpus / mem_reservation set to avoid host OOM (15 GiB host
+#     w/ ~13 nanoclaw + lumina + LK + traefik already running)
+#   - stop_grace_period 30s to mitigate upstream #30636 (SIGTERM mid-flush
+#     state.db corruption)
+#   - Lumina + LK + nano-webhook env passthrough from $HERMES_HOME/.env
 #
-# Security notes:
-#   - The dashboard service binds to 127.0.0.1 by default. It stores API
-#     keys; exposing it on LAN without auth is unsafe. If you want remote
-#     access, use an SSH tunnel or put it behind a reverse proxy that
-#     adds authentication — do NOT pass --insecure --host 0.0.0.0.
-#   - If you override entrypoint, keep `/init` as the first command in
-#     the chain (or let docker use the image's default ENTRYPOINT,
-#     which is `["/init", "/opt/hermes/docker/main-wrapper.sh"]`).
-#     `/init` is s6-overlay's PID 1 — it runs the cont-init.d scripts
-#     (chown, profile reconcile, dashboard toggle) and sets up the
-#     supervision tree before any service starts. Bypassing it skips
-#     all of that setup and the gateway will not work correctly.
-#   - The gateway's API server is off unless you uncomment API_SERVER_KEY
-#     and API_SERVER_HOST. See docs/user-guide/api-server.md before doing
-#     this on an internet-facing host.
+# Security:
+#   - Dashboard binds 0.0.0.0 inside container; published to 127.0.0.1:9119 on
+#     host only. Tailscale Serve fronts it on tailnet (HTTPS, tailnet-only).
+#   - API server off (no API_SERVER_KEY env).
+#   - inside-net is internal mesh, not Internet-reachable.
 #
 services:
   gateway:
@@ -32,45 +33,126 @@ services:
     image: hermes-agent
     container_name: hermes
     restart: unless-stopped
-    network_mode: host
+    stop_grace_period: 30s
+    networks:
+      - inside-net
     volumes:
-      - ~/.hermes:/opt/data
+      - /data/stacks/hermes/data:/opt/data
+      - /data/logs/hermes:/opt/data/logs
+      - /data/stacks/hermes/agent-work:/opt/data/workspace
+      # Local override of upstream 01-hermes-setup (bare /bin/sh → /command/with-contenv sh).
+      # See home/ops/docker/01-hermes-setup header for rationale.
+      - /data/stacks/hermes/home/ops/docker/01-hermes-setup:/etc/cont-init.d/01-hermes-setup:ro
+      # Idempotent symlink hook: per-profile plugins/ → ../../plugins so user
+      # plugins mounted at /opt/data/plugins are visible to `hermes --profile`.
+      - /data/stacks/hermes/home/ops/docker/02-link-shared-plugins:/etc/cont-init.d/02-link-shared-plugins:ro
+      # Charis-owned user plugins. Hermes discovers $HERMES_HOME/plugins/<kind>/<name>/
+      # at module import time. Mounting the parent dir lets future plugins drop in
+      # without compose edits. Read-only so the agent can't modify its own code.
+      - /data/stacks/hermes/home/ops/plugins:/opt/data/plugins:ro
     environment:
-      - HERMES_UID=${HERMES_UID:-10000}
-      - HERMES_GID=${HERMES_GID:-10000}
-      # To expose the OpenAI-compatible API server beyond localhost,
-      # uncomment BOTH lines (API_SERVER_KEY is mandatory for auth):
+      - HERMES_UID=${HERMES_UID:-1000}
+      - HERMES_GID=${HERMES_GID:-1000}
+      - HERMES_HOME=/opt/data
+      # HOME=/opt/data is REQUIRED. main-wrapper.sh uses `s6-setuidgid
+      # hermes` which only changes UID/GID and does NOT reset HOME. The
+      # hermes user inherits HOME=/root from s6-overlay's init env →
+      # any process trying to write to `~/.local/state/...` (e.g.
+      # gateway-locks for Telegram bot-token) hits permission denied
+      # and retry-loops silently. Setting HOME at container scope fixes
+      # it for every supervised + main process. See passwd entry
+      # `hermes:x:1000:1000::/opt/data:/bin/sh` — /opt/data is the
+      # designed home dir; only the env propagation was missing.
+      - HOME=/opt/data
+      # Lumina / LoreKeeper / Nano vars come EXCLUSIVELY from env_file
+      # below — do NOT add `- VAR=${VAR}` lines here. compose interpolates
+      # ${VAR} from the SHELL environment at `up` time; when the shell is
+      # missing the var (the common case for cron-driven / non-interactive
+      # `compose up`) compose sets the container env to empty string,
+      # OVERRIDING whatever env_file would have provided. This silently
+      # broke Lumina + LK auth on 2026-05-26; the only safe pattern is
+      # env_file as the single source of truth.
+      # Defaults below ARE safe because the LHS is the literal default
+      # only when the var is fully unset in env_file too.
+      - LUMINA_API_BASE=${LUMINA_API_BASE:-http://lumina-litellm:4000/v1}
+      - LOREKEEPER_URL=${LOREKEEPER_URL:-http://memory-mcp:3001}
+      - LOREKEEPER_GATEWAY_URL=${LOREKEEPER_GATEWAY_URL:-http://memory-gateway:3000}
+      - LOREKEEPER_AUTH_SCHEME=${LOREKEEPER_AUTH_SCHEME:-ApiKey}
+      - LOREKEEPER_AGENT_NAME=${LOREKEEPER_AGENT_NAME:-hermes}
+      - NANO_WEBHOOK_URL=${NANO_WEBHOOK_URL:-http://nano-webhook:3456}
+      # API server OFF unless explicitly enabled (see docs/user-guide/api-server.md)
       # - API_SERVER_HOST=0.0.0.0
       # - API_SERVER_KEY=${API_SERVER_KEY}
-      # Microsoft Teams — uncomment and fill in to enable Teams gateway.
-      # Register your bot at https://dev.botframework.com/ to get these values.
-      # - TEAMS_CLIENT_ID=${TEAMS_CLIENT_ID}
-      # - TEAMS_CLIENT_SECRET=${TEAMS_CLIENT_SECRET}
-      # - TEAMS_TENANT_ID=${TEAMS_TENANT_ID}
-      # - TEAMS_ALLOWED_USERS=${TEAMS_ALLOWED_USERS}
-      # - TEAMS_PORT=${TEAMS_PORT:-3978}
-      # Google Chat — uncomment and fill in to enable the Google Chat gateway.
-      # See website/docs/user-guide/messaging/google_chat.md for the full setup.
-      # The SA JSON path must point to a file mounted into the container —
-      # add a volume entry above (e.g. ``- ~/.hermes/google-chat-sa.json:/secrets/google-chat-sa.json:ro``)
-      # then set GOOGLE_CHAT_SERVICE_ACCOUNT_JSON to that mount path.
-      # - GOOGLE_CHAT_PROJECT_ID=${GOOGLE_CHAT_PROJECT_ID}
-      # - GOOGLE_CHAT_SUBSCRIPTION_NAME=${GOOGLE_CHAT_SUBSCRIPTION_NAME}
-      # - GOOGLE_CHAT_SERVICE_ACCOUNT_JSON=${GOOGLE_CHAT_SERVICE_ACCOUNT_JSON}
-      # - GOOGLE_CHAT_ALLOWED_USERS=${GOOGLE_CHAT_ALLOWED_USERS}
+      # Microsoft Teams — deferred (Phase 7).
+      # Google Chat — deferred (Phase 7).
+    env_file:
+      - /data/stacks/hermes/data/.env
+    cpus: 1.0
+    mem_limit: 1536m
+    mem_reservation: 512m
+    ulimits:
+      nofile: 65536
     command: ["gateway", "run"]
+    # `hermes doctor` exits 0 even with reported issues (cosmetic provider
+    # warnings, missing key warnings) — unusable for healthcheck. Instead
+    # check s6 main-hermes service which always runs the default-profile
+    # gateway (`hermes gateway run`). Profile gateways (private/family/
+    # research) are user-managed via `s6-svc -u` and may be intentionally
+    # down at times; main-hermes is the canonical liveness signal.
+    healthcheck:
+      test: ["CMD-SHELL", "/command/s6-svstat /run/service/main-hermes | grep -q '^up'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   dashboard:
     image: hermes-agent
     container_name: hermes-dashboard
     restart: unless-stopped
-    network_mode: host
+    stop_grace_period: 15s
     depends_on:
       - gateway
+    networks:
+      - inside-net
     volumes:
-      - ~/.hermes:/opt/data
+      - /data/stacks/hermes/data:/opt/data
+      # Dashboard logs go to a SEPARATE host path so the dashboard
+      # container's s6-log processes (which the shared image always
+      # spawns for every gateway profile, even when dashboard role
+      # doesn't actually run them) don't fight the hermes container's
+      # s6-log processes for locks on the SAME files. Without this
+      # split, both containers race on
+      # /data/logs/hermes/gateways/{*}/lock and whoever loses can't
+      # write logs at all. Fix landed 2026-05-26.
+      - /data/logs/hermes-dashboard:/opt/data/logs
+      - /data/stacks/hermes/home/ops/docker/01-hermes-setup:/etc/cont-init.d/01-hermes-setup:ro
+      - /data/stacks/hermes/home/ops/docker/02-link-shared-plugins:/etc/cont-init.d/02-link-shared-plugins:ro
+      - /data/stacks/hermes/home/ops/plugins:/opt/data/plugins:ro
     environment:
-      - HERMES_UID=${HERMES_UID:-10000}
-      - HERMES_GID=${HERMES_GID:-10000}
-    # Localhost-only. For remote access, tunnel via `ssh -L 9119:localhost:9119`.
-    command: ["dashboard", "--host", "127.0.0.1", "--no-open"]
+      - HERMES_UID=${HERMES_UID:-1000}
+      - HERMES_GID=${HERMES_GID:-1000}
+      - HERMES_HOME=/opt/data
+      - HOME=/opt/data  # required — see gateway service comment above
+    cpus: 0.3
+    mem_limit: 384m
+    mem_reservation: 128m
+    # Bind 0.0.0.0 inside container so the docker port-publish to host
+    # loopback below works. Host exposure stays scoped to 127.0.0.1 — only
+    # tailscaled (via `tailscale serve`) fronts it on the tailnet.
+    # --insecure required because hermes-dashboard refuses non-loopback
+    # binds otherwise; defence-in-depth comes from (a) port published only
+    # to host 127.0.0.1, (b) tailscale serve fronting with tailnet ACLs.
+    ports:
+      - "127.0.0.1:9119:9119"
+    command: ["dashboard", "--host", "0.0.0.0", "--no-open", "--insecure"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 3 http://localhost:9119/healthz >/dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  inside-net:
+    external: true
