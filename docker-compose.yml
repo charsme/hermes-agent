@@ -147,7 +147,10 @@ services:
       - HERMES_HOME=/opt/data
       - HOME=/opt/data  # required — see gateway service comment above
     cpus: 0.3
-    mem_limit: 384m
+    # Bumped 384m→512m 2026-06-17: the v0.16.0 (upstream catch-up) image idles
+    # at ~359MiB (94% of the old 384m cap) — only ~25MiB headroom, OOM risk
+    # under dashboard load. Host has ample free mem. Reservation left at 128m.
+    mem_limit: 512m
     mem_reservation: 128m
     # Bind 0.0.0.0 inside container so the docker port-publish to host
     # loopback below works. Host exposure stays scoped to 127.0.0.1 — only
