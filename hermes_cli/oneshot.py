@@ -337,7 +337,45 @@ def _run_agent(
     agent.stream_delta_callback = None
     agent.tool_gen_callback = None
 
-    return agent.chat(prompt) or ""
+    try:
+        return agent.chat(prompt) or ""
+    finally:
+        # Mirror cli.py atexit memory teardown so oneshot honours the same
+        # session boundary as interactive chat: memory providers' on_session_end
+        # hooks fire (e.g. lorekeeper promotes working memory → episodic),
+        # outbox workers stop cleanly, plugin on_session_finalize/on_session_end
+        # hooks run. Without this the agent writes working memory that
+        # silently expires from Redis without ever being committed.
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _invoke_hook(
+                "on_session_finalize",
+                session_id=getattr(agent, "session_id", None),
+                platform="cli",
+            )
+        except Exception:
+            pass
+        try:
+            if hasattr(agent, "shutdown_memory_provider"):
+                _msgs = getattr(agent, "_session_messages", None)
+                if isinstance(_msgs, list):
+                    agent.shutdown_memory_provider(_msgs)
+                else:
+                    agent.shutdown_memory_provider()
+        except Exception:
+            pass
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+            _invoke_hook(
+                "on_session_end",
+                session_id=getattr(agent, "session_id", None),
+                completed=True,
+                interrupted=False,
+                model=getattr(agent, "model", None),
+                platform="cli",
+            )
+        except Exception:
+            pass
 
 
 def _oneshot_clarify_callback(question: str, choices=None) -> str:

@@ -46,6 +46,16 @@ services:
       # Idempotent symlink hook: per-profile plugins/ → ../../plugins so user
       # plugins mounted at /opt/data/plugins are visible to `hermes --profile`.
       - /data/stacks/hermes/home/ops/docker/02-link-shared-plugins:/etc/cont-init.d/02-link-shared-plugins:ro
+      # Flips private's gateway_state.json from clean-stopped back to running BEFORE
+      # 02-reconcile-profiles reads it, so private (the Telegram bot owner under the
+      # single-bot policy) auto-restarts after every graceful container reboot.
+      # See home/ops/docker/015-private-gateway-autostart header for full rationale.
+      - /data/stacks/hermes/home/ops/docker/015-private-gateway-autostart:/etc/cont-init.d/015-private-gateway-autostart:ro
+      # Local override of upstream main-wrapper.sh (#!/bin/sh → #!/command/with-contenv sh).
+      # s6-overlay TOP cmd otherwise spawned with sanitized env (PATH only) so HERMES_HOME
+      # never reached the python process — broke hermes-dashboard /api/profiles listing.
+      # See home/ops/docker/main-wrapper.sh header for full rationale.
+      - /data/stacks/hermes/home/ops/docker/main-wrapper.sh:/opt/hermes/docker/main-wrapper.sh:ro
       # Charis-owned user plugins. Hermes discovers $HERMES_HOME/plugins/<kind>/<name>/
       # at module import time. Mounting the parent dir lets future plugins drop in
       # without compose edits. Read-only so the agent can't modify its own code.
@@ -128,6 +138,16 @@ services:
       - /data/logs/hermes-dashboard:/opt/data/logs
       - /data/stacks/hermes/home/ops/docker/01-hermes-setup:/etc/cont-init.d/01-hermes-setup:ro
       - /data/stacks/hermes/home/ops/docker/02-link-shared-plugins:/etc/cont-init.d/02-link-shared-plugins:ro
+      # Flips private's gateway_state.json from clean-stopped back to running BEFORE
+      # 02-reconcile-profiles reads it, so private (the Telegram bot owner under the
+      # single-bot policy) auto-restarts after every graceful container reboot.
+      # See home/ops/docker/015-private-gateway-autostart header for full rationale.
+      - /data/stacks/hermes/home/ops/docker/015-private-gateway-autostart:/etc/cont-init.d/015-private-gateway-autostart:ro
+      # Local override of upstream main-wrapper.sh (#!/bin/sh → #!/command/with-contenv sh).
+      # s6-overlay TOP cmd otherwise spawned with sanitized env (PATH only) so HERMES_HOME
+      # never reached the python process — broke hermes-dashboard /api/profiles listing.
+      # See home/ops/docker/main-wrapper.sh header for full rationale.
+      - /data/stacks/hermes/home/ops/docker/main-wrapper.sh:/opt/hermes/docker/main-wrapper.sh:ro
       - /data/stacks/hermes/home/ops/plugins:/opt/data/plugins:ro
     environment:
       - HERMES_UID=${HERMES_UID:-1000}

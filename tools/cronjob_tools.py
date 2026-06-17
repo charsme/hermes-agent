@@ -49,6 +49,17 @@ _CRON_THREAT_PATTERNS = [
     (r'authorized_keys', "ssh_backdoor"),
     (r'/etc/sudoers|visudo', "sudoers_mod"),
     (r'rm\s+-rf\s+/', "destructive_root_rm"),
+    # Phase 3.3 belt-and-suspenders for upstream #30719 (cron-respawn-loop).
+    # LK policy `no-cron-gateway-restart` also blocks at policy layer. These
+    # patterns block at cron prompt scan time so a job can't be created or
+    # fired with a payload that asks the agent to restart its own gateway —
+    # the classic loop trigger.
+    (r'gateway[\s-]restart', "cron_gateway_restart"),
+    (r'hermes\s+gateway\s+(restart|stop|kill)', "cron_hermes_gateway_op"),
+    (r'systemctl\s+(restart|stop|kill|start)\s+hermes', "cron_systemctl_hermes"),
+    (r'launchctl\s+(load|unload|kickstart|bootout|bootstrap)\s+[^\n]*hermes', "cron_launchctl_hermes"),
+    (r'docker\s+(restart|stop|kill|rm)\s+hermes', "cron_docker_hermes_op"),
+    (r'docker\s+compose\s+(restart|stop|down|kill|rm)\b', "cron_compose_restart"),
 ]
 
 _CRON_SECRET_VAR_RE = r'\$\{?\w*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)\w*\}?'

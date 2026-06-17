@@ -920,9 +920,12 @@ def _resolve_trust_level(source: str) -> str:
     # Official optional skills shipped with the repo
     if normalized_source.startswith("official/") or normalized_source == "official":
         return "builtin"
-    # Check if source matches any trusted repo
+    # Check if source matches any trusted repo.
+    # Path-rooted prefix only — bare startswith() allowed attacker-controlled
+    # identifiers like "openai/skills-evil-fork" to inherit `trusted`.
+    # Local patch for upstream #31141. Carry until upstream lands a fix.
     for trusted in TRUSTED_REPOS:
-        if normalized_source.startswith(trusted) or normalized_source == trusted:
+        if normalized_source == trusted or normalized_source.startswith(trusted + "/"):
             return "trusted"
     return "community"
 
