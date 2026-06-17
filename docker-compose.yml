@@ -135,11 +135,12 @@ services:
       - /data/logs/hermes-dashboard:/opt/data/logs
       # 01-hermes-setup + main-wrapper.sh overrides REMOVED 2026-06-17 (baked upstream — see gateway service).
       - /data/stacks/hermes/home/ops/docker/02-link-shared-plugins:/etc/cont-init.d/02-link-shared-plugins:ro
-      # Flips private's gateway_state.json from clean-stopped back to running BEFORE
-      # 02-reconcile-profiles reads it, so private (the Telegram bot owner under the
-      # single-bot policy) auto-restarts after every graceful container reboot.
-      # See home/ops/docker/015-private-gateway-autostart header for full rationale.
-      - /data/stacks/hermes/home/ops/docker/015-private-gateway-autostart:/etc/cont-init.d/015-private-gateway-autostart:ro
+      # NO 015-private-gateway-autostart here — the dashboard container must never
+      # own a gateway (single-bot = private on the GATEWAY container). Instead,
+      # down the gateway machinery the shared image would otherwise auto-run in
+      # this container (main-hermes + reconcile-started profile gateways), so it
+      # runs ONLY `hermes dashboard`. See the hook header for full rationale.
+      - /data/stacks/hermes/home/ops/docker/03-dashboard-disable-gateways:/etc/cont-init.d/03-dashboard-disable-gateways:ro
       - /data/stacks/hermes/home/ops/plugins:/opt/data/plugins:ro
     environment:
       - HERMES_UID=${HERMES_UID:-1000}
@@ -147,13 +148,11 @@ services:
       - HERMES_HOME=/opt/data
       - HOME=/opt/data  # required — see gateway service comment above
     cpus: 0.3
-    # Bumped 384m→768m 2026-06-17. The dashboard CONTAINER (shared image) also
-    # runs the baked main-hermes + reconcile-started profile gateways, so its
-    # real footprint on v0.16.0 is ~465MiB, not the dashboard process alone
-    # (~122MiB). 768m gives ~60% headroom. NOTE: if the dashboard container is
-    # later made dashboard-only (down main-hermes + gateway-* — see STATUS
-    # follow-up), this can drop back to 384m. Reservation left at 128m.
-    mem_limit: 768m
+    # 384m: the dashboard container is dashboard-only as of 2026-06-17 —
+    # 03-dashboard-disable-gateways (cont-init, mounted only on this service)
+    # downs main-hermes + gateway-* that the shared image would otherwise run,
+    # leaving just `hermes dashboard` (~122MiB). Reservation left at 128m.
+    mem_limit: 384m
     mem_reservation: 128m
     # Bind 0.0.0.0 inside container so the docker port-publish to host
     # loopback below works. Host exposure stays scoped to 127.0.0.1 — only
